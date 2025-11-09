@@ -634,38 +634,63 @@ class CryptoACBApp:
             return
         item = self.trans_tree.item(selected[0])
         values = item['values']
-        # Map: ID, Date, Action, RecToken, RecAmt, RecCAD, SentToken, SentAmt, SentCAD, Notes
         trans_id = values[0]
 
-        # Reconstruct raw values (remove formatting)
-        try:
-            rec_amt = float(values[4]) if values[4] else 0.0
-            rec_cad = float(values[5].replace('$','')) if values[5] else 0.0
-            sent_amt = float(values[7]) if values[7] else 0.0
-            sent_cad = float(values[8].replace('$','')) if values[8] else 0.0
-        except:
-            rec_amt = rec_cad = sent_amt = sent_cad = 0.0
+        # Helper to safely parse currency strings like "$12.34" → 12.34
+        def parse_currency(s):
+            if not s or s == "":
+                return 0.0
+            try:
+                return float(s.replace('$', ''))
+            except ValueError:
+                return 0.0
 
+        def parse_amount(s):
+            if not s or s == "":
+                return 0.0
+            try:
+                return float(s)
+            except ValueError:
+                return 0.0
+
+        # Reconstruct raw values from Treeview (which has formatted strings)
+        date = values[1]
+        action = values[2]
+        token = values[3] or ""
+        rec_amt = parse_amount(values[4]) if values[4] else 0.0
+        rec_cad = parse_currency(values[5]) if values[5] else 0.0
+        sent_token = values[6] or ""
+        sent_amt = parse_amount(values[7]) if values[7] else 0.0
+        sent_cad = parse_currency(values[8]) if values[8] else 0.0
+        fee_cad = parse_currency(values[9]) if values[9] else 0.0
+        gas_cad = parse_currency(values[10]) if values[10] else 0.0
+        notes = values[11] or ""
+
+        # Build old_row in the exact order expected by TransactionDialog:
+        # (date, token, action, token_amt, cad_amt, notes, sent_token, sent_amt, sent_cad, fee_cad, gas_cad)
         old_row = (
-            None,  # placeholder for ID (not used in dialog)
-            values[1],  # date
-            values[3],  # token (received)
-            values[2],  # action
-            rec_amt,    # token_amount (received)
-            rec_cad,    # cad_amount (received)
-            values[9],  # notes
-            values[6],  # sent_token
-            sent_amt,   # sent_amount
-            sent_cad    # sent_cad
+            None,  # unused placeholder for ID
+            date,
+            token,
+            action,
+            rec_amt,
+            rec_cad,
+            notes,
+            sent_token,
+            sent_amt,
+            sent_cad,
+            fee_cad,   # was missing!
+            gas_cad    # was missing!
         )
 
         dialog = TransactionDialog(self.root, old_row)
         if dialog.result:
-            # dialog.result = (date, token, action, token_amt, cad_amt, notes, sent_token, sent_amt, sent_cad)
+            (date, token, action, token_amt, cad_amt, notes,
+            sent_token, sent_amt, sent_cad, fee_cad, gas_cad) = dialog.result
+
             with sqlite3.connect(DB_FILE) as conn:
                 conn.execute('BEGIN')
                 try:
-                    # Update the transaction
                     conn.execute('''
                         UPDATE transactions
                         SET date=?, token=?, action=?, token_amount=?, cad_amount=?, notes=?,
@@ -673,17 +698,11 @@ class CryptoACBApp:
                         WHERE id=?
                     ''', (date, token, action, token_amt, cad_amt, notes,
                         sent_token, sent_amt, sent_cad, fee_cad, gas_cad, trans_id))
-                    
-                    # Recompute ACB immediately
                     self.recompute_acb(conn)
-                    
-                    # Commit the transaction
                     conn.commit()
                 except Exception as e:
                     conn.rollback()
                     raise e
-            
-            # Reload the display
             self.load_data()
 
     def delete_transaction(self):
