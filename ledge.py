@@ -7,36 +7,74 @@ import os
 import csv
 from datetime import datetime
 from collections import defaultdict
+import shutil
+from pathlib import Path
 
 DB_FILE = "ledge.db"
 
+def backup_database():
+    """Create a backup of the database file with timestamp."""
+    if not Path(DB_FILE).exists():
+        return
+    
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    backup_dir = Path('backups')
+    backup_dir.mkdir(exist_ok=True)
+    
+    backup_file = backup_dir / f'ledge_{timestamp}.db'
+    try:
+        shutil.copy2(DB_FILE, backup_file)
+        # Keep only last 5 backups
+        backups = sorted(backup_dir.glob('ledge_*.db'))
+        if len(backups) > 5:
+            for old_backup in backups[:-5]:
+                old_backup.unlink()
+    except Exception as e:
+        print(f'Failed to create backup: {e}')
+
+
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute('''
-    CREATE TABLE IF NOT EXISTS transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date TEXT NOT NULL,
-        token TEXT NOT NULL,
-        action TEXT NOT NULL,
-        token_amount REAL NOT NULL,
-        cad_amount REAL NOT NULL,
-        notes TEXT,
-        sent_token TEXT,
-        sent_amount REAL,
-        sent_cad REAL,
-        fee_cad REAL DEFAULT 0.0,    -- exchange fee
-        gas_cad REAL DEFAULT 0.0     -- network fee
-    )
-    ''')
-    conn.execute('''
-    CREATE TABLE IF NOT EXISTS acb_state (
-        token TEXT PRIMARY KEY,
-        total_acb REAL NOT NULL DEFAULT 0.0,
-        units_held REAL NOT NULL DEFAULT 0.0
-    )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        # Add date format check constraint
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL CHECK (date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+            token TEXT NOT NULL,
+            action TEXT NOT NULL,
+            token_amount REAL NOT NULL,
+            cad_amount REAL NOT NULL,
+            notes TEXT,
+            sent_token TEXT,
+            sent_amount REAL,
+            sent_cad REAL,
+            fee_cad REAL DEFAULT 0.0,    -- exchange fee
+            gas_cad REAL DEFAULT 0.0     -- network fee
+        )
+        ''')
+        
+        # Create indexes for frequently queried columns
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_trans_date ON transactions(date)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_trans_token ON transactions(token)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_trans_sent_token ON transactions(sent_token)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_trans_action ON transactions(action)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_trans_cad_amount ON transactions(cad_amount)')
+        
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS acb_state (
+            token TEXT PRIMARY KEY,
+            total_acb REAL NOT NULL DEFAULT 0.0,
+            units_held REAL NOT NULL DEFAULT 0.0
+        )
+        ''')
+        conn.commit()
+    except sqlite3.Error as e:
+        messagebox.showerror('Database Error', f'Failed to initialize database: {e}')
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 class TransactionDialog(tk.Toplevel):
     def __init__(self, parent, transaction=None):
@@ -294,6 +332,10 @@ class CryptoACBApp:
         init_db()
         self.setup_ui()
         self.load_data()
+        
+        # Initialize sorting state
+        self.sort_column = None
+        self.sort_reverse = False
 
     def load_geometry(self):
         """Load window geometry from ledge.ini, or use default"""
@@ -322,26 +364,95 @@ class CryptoACBApp:
         self.trans_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.trans_frame, text="Transactions")
 
+        # Create and initialize the filter frame first
+        self.filter_frame = ttk.LabelFrame(self.trans_frame)
+
+        # Filter toggle and container frame
+        filter_container = ttk.Frame(self.trans_frame)
+        filter_container.pack(fill=tk.X, padx=5, pady=5)
+
+        # Toggle button with arrow
+        self.filter_visible = tk.BooleanVar(value=False)
+        self.toggle_btn = ttk.Button(filter_container, text="▼ Show Filters", 
+                                    command=self.toggle_filters)
+        self.toggle_btn.pack(side=tk.LEFT, padx=5)
+
+        # Status label to show when filters are active
+        self.filter_status = ttk.Label(filter_container, text="")
+        self.filter_status.pack(side=tk.LEFT, padx=5)
+
+        # Filter frame (initially hidden)
+        self.filter_frame = ttk.LabelFrame(self.trans_frame)
+        
+        # Date range
+        date_frame = ttk.Frame(self.filter_frame)
+        date_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Label(date_frame, text="Date Range:").pack(side=tk.LEFT, padx=5)
+        self.date_from_var = tk.StringVar()
+        ttk.Entry(date_frame, textvariable=self.date_from_var, width=10).pack(side=tk.LEFT, padx=5)
+        ttk.Label(date_frame, text="to").pack(side=tk.LEFT, padx=5)
+        self.date_to_var = tk.StringVar()
+        ttk.Entry(date_frame, textvariable=self.date_to_var, width=10).pack(side=tk.LEFT, padx=5)
+
+        # Token and action filters
+        filter_row = ttk.Frame(self.filter_frame)
+        filter_row.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(filter_row, text="Token:").pack(side=tk.LEFT, padx=5)
+        self.token_filter_var = tk.StringVar()
+        self.token_filter = ttk.Combobox(filter_row, textvariable=self.token_filter_var, width=10)
+        self.token_filter.pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(filter_row, text="Action:").pack(side=tk.LEFT, padx=5)
+        self.action_filter_var = tk.StringVar()
+        actions = ["", "Buy", "Sell", "Trade", "StakeIn", "StakeOut", "Reward"]
+        self.action_filter = ttk.Combobox(filter_row, textvariable=self.action_filter_var, values=actions, width=10)
+        self.action_filter.pack(side=tk.LEFT, padx=5)
+
+        # Amount range
+        amount_frame = ttk.Frame(self.filter_frame)
+        amount_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Label(amount_frame, text="CAD Amount Range:").pack(side=tk.LEFT, padx=5)
+        self.amount_from_var = tk.StringVar()
+        ttk.Entry(amount_frame, textvariable=self.amount_from_var, width=10).pack(side=tk.LEFT, padx=5)
+        ttk.Label(amount_frame, text="to").pack(side=tk.LEFT, padx=5)
+        self.amount_to_var = tk.StringVar()
+        ttk.Entry(amount_frame, textvariable=self.amount_to_var, width=10).pack(side=tk.LEFT, padx=5)
+
+        # Filter buttons
+        btn_frame = ttk.Frame(self.filter_frame)
+        btn_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Button(btn_frame, text="Apply Filters", command=self.apply_filters).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Clear Filters", command=self.clear_filters).pack(side=tk.LEFT, padx=5)
+
+        # Transaction buttons frame
         trans_btn_frame = ttk.Frame(self.trans_frame)
         trans_btn_frame.pack(fill=tk.X, pady=5)
         ttk.Button(trans_btn_frame, text="Add", command=self.add_transaction).pack(side=tk.LEFT, padx=5)
         ttk.Button(trans_btn_frame, text="Edit", command=self.edit_transaction).pack(side=tk.LEFT, padx=5)
         ttk.Button(trans_btn_frame, text="Delete", command=self.delete_transaction).pack(side=tk.LEFT, padx=5)
-        ttk.Button(trans_btn_frame, text="Recalculate ACB", command=self.recompute_acb).pack(side=tk.RIGHT, padx=5)
         ttk.Button(trans_btn_frame, text="Export CSV", command=self.export_csv).pack(side=tk.RIGHT, padx=5)
 
         # Updated columns: include sent_* for trades
-        cols = ("ID", "Date", "Action", "ReceivedToken", "ReceivedAmt", "ReceivedCAD",
-                "SentToken", "SentAmt", "SentCAD", "FeeCAD", "GasCAD","Notes")
-        self.trans_tree = ttk.Treeview(self.trans_frame, columns=cols, show="headings", height=15)
+        self.cols = ("ID", "Date", "Action", "ReceivedToken", "ReceivedAmt", "ReceivedCAD",
+                     "SentToken", "SentAmt", "SentCAD", "FeeCAD", "GasCAD", "Notes")
+        self.trans_tree = ttk.Treeview(self.trans_frame, columns=self.cols, show="headings", height=15)
+        
+        # Configure sorting
+        self.sort_column = None
+        self.sort_reverse = False
         col_widths = {
             "ID": 40, "Date": 100, "Action": 80,
             "ReceivedToken": 90, "ReceivedAmt": 90, "ReceivedCAD": 90,
             "SentToken": 90, "SentAmt": 90, "SentCAD": 90,
             "Notes": 200
         }
-        for col in cols:
-            self.trans_tree.heading(col, text=col.replace("Received", "Rec.").replace("Sent", "Sent"))
+        for col in self.cols:
+            # Create a lambda with a default argument to capture the current col value
+            heading_cmd = lambda c=col: self.sort_by_column(c)
+            self.trans_tree.heading(col, 
+                text=col.replace("Received", "Rec.").replace("Sent", "Sent"),
+                command=heading_cmd)
             self.trans_tree.column(col, width=col_widths.get(col, 100))
         self.trans_tree.pack(fill=tk.BOTH, expand=True, pady=5)
 
@@ -373,32 +484,99 @@ class CryptoACBApp:
         self.load_acb_summary()
 
     def load_transactions(self):
+        # Clear existing items
         for item in self.trans_tree.get_children():
             self.trans_tree.delete(item)
-        with sqlite3.connect(DB_FILE) as conn:
-            cur = conn.execute("""
-                SELECT id, date, action, token, token_amount, cad_amount,
-                       sent_token, sent_amount, sent_cad, fee_cad, gas_cad, notes
-                FROM transactions
-                ORDER BY date, id
-            """)
-            for row in cur.fetchall():
-                # Format numbers
-                fmt_row = (
-                    row[0],  # ID
-                    row[1],  # Date
-                    row[2],  # Action
-                    row[3] or "",  # Received Token
-                    f"{row[4]:.8f}" if row[4] is not None else "",  # Received Amt
-                    f"${row[5]:.2f}" if row[5] is not None else "",  # Received CAD
-                    row[6] or "",  # Sent Token
-                    f"{row[7]:.8f}" if row[7] is not None else "",  # Sent Amt
-                    f"${row[8]:.2f}" if row[8] is not None else "",  # Sent CAD
-                    f"${row[9]:.2f}" if row[9] is not None else "",   # FeeCAD
-                    f"${row[10]:.2f}" if row[10] is not None else "", # GasCAD
-                    row[11] or ""   # Notes
-                )
-                self.trans_tree.insert("", "end", values=fmt_row)
+
+        # Build query with filters and track active filters
+        query = ["SELECT id, date, action, token, token_amount, cad_amount,"
+                "       sent_token, sent_amount, sent_cad, fee_cad, gas_cad, notes",
+                "FROM transactions",
+                "WHERE 1=1"]
+        params = []
+        active_filters = []
+
+        # Apply date range filter
+        if self.date_from_var.get():
+            query.append("AND date >= ?")
+            params.append(self.date_from_var.get())
+            active_filters.append(f"From {self.date_from_var.get()}")
+        if self.date_to_var.get():
+            query.append("AND date <= ?")
+            params.append(self.date_to_var.get())
+            active_filters.append(f"To {self.date_to_var.get()}")
+
+        # Apply token filter
+        if self.token_filter_var.get():
+            query.append("AND (token = ? OR sent_token = ?)")
+            params.extend([self.token_filter_var.get(), self.token_filter_var.get()])
+            active_filters.append(f"Token: {self.token_filter_var.get()}")
+
+        # Apply action filter
+        if self.action_filter_var.get():
+            query.append("AND action = ?")
+            params.append(self.action_filter_var.get())
+            active_filters.append(f"Action: {self.action_filter_var.get()}")
+
+        # Apply amount range filter
+        try:
+            if self.amount_from_var.get():
+                amount_from = float(self.amount_from_var.get())
+                query.append("AND (cad_amount >= ? OR sent_cad >= ?)")
+                params.extend([amount_from, amount_from])
+                active_filters.append(f"Min: ${amount_from}")
+            if self.amount_to_var.get():
+                amount_to = float(self.amount_to_var.get())
+                query.append("AND (cad_amount <= ? OR sent_cad <= ?)")
+                params.extend([amount_to, amount_to])
+                active_filters.append(f"Max: ${amount_to}")
+        except ValueError:
+            messagebox.showwarning("Filter Error", "Invalid amount filter value")
+
+        # Add sorting
+        if self.sort_column:
+            # Handle special cases for formatted columns
+            sort_col = self.sort_column.lower()
+            if sort_col in ['receivedamt', 'receivedcad', 'sentamt', 'sentcad', 'feecad', 'gascad']:
+                # Map display columns to DB columns
+                col_map = {
+                    'receivedamt': 'token_amount',
+                    'receivedcad': 'cad_amount',
+                    'sentamt': 'sent_amount',
+                    'sentcad': 'sent_cad',
+                    'feecad': 'fee_cad',
+                    'gascad': 'gas_cad'
+                }
+                sort_col = col_map.get(sort_col, sort_col)
+            query.append(f"ORDER BY {sort_col} {'DESC' if self.sort_reverse else 'ASC'}, id")
+        else:
+            query.append("ORDER BY date DESC, id DESC")
+
+        try:
+            with sqlite3.connect(DB_FILE) as conn:
+                cur = conn.execute(" ".join(query), params)
+                for row in cur.fetchall():
+                    # Format numbers
+                    fmt_row = (
+                        row[0],  # ID
+                        row[1],  # Date
+                        row[2],  # Action
+                        row[3] or "",  # Received Token
+                        f"{row[4]:.8f}" if row[4] is not None else "",  # Received Amt
+                        f"${row[5]:.2f}" if row[5] is not None else "",  # Received CAD
+                        row[6] or "",  # Sent Token
+                        f"{row[7]:.8f}" if row[7] is not None else "",  # Sent Amt
+                        f"${row[8]:.2f}" if row[8] is not None else "",  # Sent CAD
+                        f"${row[9]:.2f}" if row[9] is not None else "",   # FeeCAD
+                        f"${row[10]:.2f}" if row[10] is not None else "", # GasCAD
+                        row[11] or ""   # Notes
+                    )
+                    self.trans_tree.insert("", "end", values=fmt_row)
+        except sqlite3.Error as e:
+            messagebox.showerror("Database Error", f"Error loading transactions: {e}")
+
+        # Update token filter choices
+        self.update_token_choices()
 
     def load_acb_summary(self):
         for item in self.acb_tree.get_children():
@@ -410,6 +588,7 @@ class CryptoACBApp:
                 self.acb_tree.insert("", "end", values=(token, f"{units:.8f}", f"${total:.2f}", f"${acb_per:.4f}"))
 
     def add_transaction(self):
+        backup_database()  # Backup before modification
         dialog = TransactionDialog(self.root)
         if dialog.result:
             # Unpack ALL 11 values from the dialog
@@ -417,15 +596,29 @@ class CryptoACBApp:
              sent_token, sent_amt, sent_cad, fee_cad, gas_cad) = dialog.result
 
             with sqlite3.connect(DB_FILE) as conn:
-                conn.execute("""
-                    INSERT INTO transactions 
-                    (date, token, action, token_amount, cad_amount, notes,
-                     sent_token, sent_amount, sent_cad, fee_cad, gas_cad)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (date, token, action, token_amt, cad_amt, notes,
-                      sent_token, sent_amt, sent_cad, fee_cad, gas_cad))
+                # Start a transaction
+                conn.execute('BEGIN')
+                try:
+                    # Insert the transaction
+                    conn.execute("""
+                        INSERT INTO transactions 
+                        (date, token, action, token_amount, cad_amount, notes,
+                         sent_token, sent_amount, sent_cad, fee_cad, gas_cad)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (date, token, action, token_amt, cad_amt, notes,
+                          sent_token, sent_amt, sent_cad, fee_cad, gas_cad))
+                    
+                    # Update ACB immediately
+                    self.recompute_acb(conn)
+                    
+                    # Commit the transaction
+                    conn.commit()
+                except Exception as e:
+                    conn.rollback()
+                    raise e
+            
+            # Reload the display
             self.load_data()
-            self.recompute_acb()
             
     def save_geometry(self):
         """Save window geometry to ledge.ini"""
@@ -470,15 +663,28 @@ class CryptoACBApp:
         if dialog.result:
             # dialog.result = (date, token, action, token_amt, cad_amt, notes, sent_token, sent_amt, sent_cad)
             with sqlite3.connect(DB_FILE) as conn:
-                conn.execute('''
-                    UPDATE transactions
-                    SET date=?, token=?, action=?, token_amount=?, cad_amount=?, notes=?,
-                        sent_token=?, sent_amount=?, sent_cad=?, fee_cad=?, gas_cad=?
-                    WHERE id=?
-                ''', (date, token, action, token_amt, cad_amt, notes,
-                    sent_token, sent_amt, sent_cad, fee_cad, gas_cad, trans_id))
+                conn.execute('BEGIN')
+                try:
+                    # Update the transaction
+                    conn.execute('''
+                        UPDATE transactions
+                        SET date=?, token=?, action=?, token_amount=?, cad_amount=?, notes=?,
+                            sent_token=?, sent_amount=?, sent_cad=?, fee_cad=?, gas_cad=?
+                        WHERE id=?
+                    ''', (date, token, action, token_amt, cad_amt, notes,
+                        sent_token, sent_amt, sent_cad, fee_cad, gas_cad, trans_id))
+                    
+                    # Recompute ACB immediately
+                    self.recompute_acb(conn)
+                    
+                    # Commit the transaction
+                    conn.commit()
+                except Exception as e:
+                    conn.rollback()
+                    raise e
+            
+            # Reload the display
             self.load_data()
-            self.recompute_acb()
 
     def delete_transaction(self):
         selected = self.trans_tree.selection()
@@ -488,13 +694,33 @@ class CryptoACBApp:
         trans_id = self.trans_tree.item(selected[0])['values'][0]
         if messagebox.askyesno("Confirm", "Delete this transaction? ACB will be recalculated."):
             with sqlite3.connect(DB_FILE) as conn:
-                conn.execute("DELETE FROM transactions WHERE id=?", (trans_id,))
+                conn.execute('BEGIN')
+                try:
+                    # Delete the transaction
+                    conn.execute("DELETE FROM transactions WHERE id=?", (trans_id,))
+                    
+                    # Recompute ACB immediately
+                    self.recompute_acb(conn)
+                    
+                    # Commit the transaction
+                    conn.commit()
+                except Exception as e:
+                    conn.rollback()
+                    raise e
+            
+            # Reload the display
             self.load_data()
-            self.recompute_acb()
 
-    def recompute_acb(self):
-        with sqlite3.connect(DB_FILE) as conn:
+    def recompute_acb(self, conn=None):
+        """Recompute ACB state. If conn is provided, use it; otherwise create a new connection."""
+        should_close = False
+        if conn is None:
+            conn = sqlite3.connect(DB_FILE)
+            should_close = True
+        
+        try:
             conn.execute("DELETE FROM acb_state")
+            # Fetch all rows first before processing
             cur = conn.execute("""
                 SELECT date, token, action, token_amount, cad_amount,
                        sent_token, sent_amount, sent_cad,
@@ -502,9 +728,11 @@ class CryptoACBApp:
                 FROM transactions
                 ORDER BY date, id
             """)
+            rows = cur.fetchall()
+            
             acb_state = defaultdict(lambda: {"total_acb": 0.0, "units_held": 0.0})
 
-            for row in cur.fetchall():
+            for row in rows:  # Use the fetched rows instead of cursor
                 (date, token, action, token_amt, cad_amt,
                  sent_token, sent_amt, sent_cad, fee_cad, gas_cad) = row
 
@@ -528,20 +756,26 @@ class CryptoACBApp:
                         # No ACB → full gain = net_proceeds
                         pass
                     else:
-                        acb_per = state["total_acb"] / state["units_held"]
-                        cost_basis = acb_per * token_amt
-                        state["total_acb"] = max(0.0, state["total_acb"] - cost_basis)
-                        state["units_held"] = max(0.0, state["units_held"] - token_amt)
+                        try:
+                            acb_per = state["total_acb"] / state["units_held"] if state["units_held"] > 0 else 0
+                            cost_basis = acb_per * token_amt
+                            state["total_acb"] = max(0.0, state["total_acb"] - cost_basis)
+                            state["units_held"] = max(0.0, state["units_held"] - token_amt)
+                        except ZeroDivisionError:
+                            pass  # If no units held, keep current state
 
                 elif action == "Trade":
                     # Sell sent_token (use sent_cad - no fee on sent side for now)
                     if sent_token and sent_amt and sent_cad is not None:
                         sent_state = acb_state[sent_token]
                         if sent_state["units_held"] > 0:
-                            acb_per_sent = sent_state["total_acb"] / sent_state["units_held"]
-                            cost_basis = acb_per_sent * sent_amt
-                            sent_state["total_acb"] = max(0.0, sent_state["total_acb"] - cost_basis)
-                            sent_state["units_held"] = max(0.0, sent_state["units_held"] - sent_amt)
+                            try:
+                                acb_per_sent = sent_state["total_acb"] / sent_state["units_held"]
+                                cost_basis = acb_per_sent * sent_amt
+                                sent_state["total_acb"] = max(0.0, sent_state["total_acb"] - cost_basis)
+                                sent_state["units_held"] = max(0.0, sent_state["units_held"] - sent_amt)
+                            except ZeroDivisionError:
+                                pass  # If no units held, keep current state
 
                     # Buy received token: ACB = cad_amt + fee_cad
                     total_cost = cad_amt + (fee_cad or 0.0)
@@ -566,6 +800,12 @@ class CryptoACBApp:
                     "INSERT OR REPLACE INTO acb_state (token, total_acb, units_held) VALUES (?, ?, ?)",
                     (token, state["total_acb"], state["units_held"])
                 )
+
+        finally:
+            if should_close:
+                conn.close()
+            
+        self.load_acb_summary()  # Update the display
         self.load_acb_summary()
 
     def generate_report_data(self):
@@ -662,6 +902,60 @@ class CryptoACBApp:
                 "token_gas": dict(token_gas),
                 "current_holdings": current_holdings
             }
+
+    def sort_by_column(self, column):
+        """Sort treeview when a column header is clicked."""
+        if self.sort_column == column:
+            # If already sorting by this column, reverse the sort order
+            self.sort_reverse = not self.sort_reverse
+        else:
+            # New sort column
+            self.sort_column = column
+            self.sort_reverse = False
+        
+        # Refresh the display with new sort
+        self.load_transactions()
+
+    def update_token_choices(self):
+        """Update the token filter dropdown with all tokens from the database."""
+        try:
+            with sqlite3.connect(DB_FILE) as conn:
+                # Get all unique tokens (both received and sent)
+                cur = conn.execute("""
+                    SELECT DISTINCT token FROM transactions WHERE token IS NOT NULL
+                    UNION
+                    SELECT DISTINCT sent_token FROM transactions WHERE sent_token IS NOT NULL
+                    ORDER BY token
+                """)
+                tokens = [""] + [row[0] for row in cur.fetchall()]
+                self.token_filter['values'] = tokens
+        except sqlite3.Error as e:
+            messagebox.showerror("Database Error", f"Error updating token choices: {e}")
+
+    def apply_filters(self):
+        """Apply the current filters and refresh the transaction list."""
+        self.load_transactions()
+
+    def clear_filters(self):
+        """Clear all filters and refresh the transaction list."""
+        self.date_from_var.set("")
+        self.date_to_var.set("")
+        self.token_filter_var.set("")
+        self.action_filter_var.set("")
+        self.amount_from_var.set("")
+        self.amount_to_var.set("")
+        self.load_transactions()
+
+    def toggle_filters(self):
+        """Toggle the visibility of the filter frame."""
+        if self.filter_visible.get():
+            self.filter_frame.pack_forget()
+            self.filter_visible.set(False)
+            self.toggle_btn.configure(text="▼ Show Filters")
+        else:
+            self.filter_frame.pack(fill=tk.X, padx=5, pady=5)
+            self.filter_visible.set(True)
+            self.toggle_btn.configure(text="▲ Hide Filters")
 
     def update_report(self):
         data = self.generate_report_data()
