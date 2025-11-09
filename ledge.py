@@ -45,74 +45,76 @@ class TransactionDialog(tk.Toplevel):
         self.result = None
         self.transient(parent)
         self.grab_set()
-        
-        # Center the dialog over the parent window
-        self.geometry("")  # Reset geometry to let window size to its natural size
-        self.resizable(False, False)  # Make dialog non-resizable
-        self.update_idletasks()  # Update "requested size" from geometry manager
-        
-        # Calculate position x, y coordinates for the window
-        parent_x = parent.winfo_x()
-        parent_y = parent.winfo_y()
+
+        self.label_map = {
+            "Buy": ("Token:", "Amount:", "CAD Value:"),
+            "Sell": ("Token:", "Amount Sold:", "Proceeds (CAD):"),
+            "Trade": ("Received Token:", "Received Amount:", "Received CAD:"),
+            "StakeIn": ("Token:", "Amount Staked:", "CAD Value:"),
+            "StakeOut": ("Token:", "Amount Unstaked:", "CAD Value:"),
+            "Reward": ("Token:", "Amount:", "FMV (CAD):")
+        }
+
+        # Center dialog over parent
+        self.update_idletasks()  # Ensure geometry is calculated
+        parent_x = parent.winfo_rootx()
+        parent_y = parent.winfo_rooty()
         parent_width = parent.winfo_width()
         parent_height = parent.winfo_height()
-        
-        dialog_width = self.winfo_width()
-        dialog_height = self.winfo_height()
-        
-        x = parent_x + (parent_width - dialog_width) // 2
-        y = parent_y + (parent_height - dialog_height) // 2
-        
+        dialog_width = self.winfo_reqwidth()
+        dialog_height = self.winfo_reqheight()
+        x = parent_x + (parent_width // 2) - (dialog_width // 2)
+        y = parent_y + (parent_height // 2) - (dialog_height // 2)
         self.geometry(f"+{x}+{y}")
 
-        # Store widgets for dynamic show/hide
-        self.sent_widgets = []
+        # Start row counter
+        row = 0
 
         # Date
-        tk.Label(self, text="Date (YYYY-MM-DD):").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        tk.Label(self, text="Date (YYYY-MM-DD):").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
         self.date_var = tk.StringVar(value=transaction[1] if transaction else datetime.now().strftime("%Y-%m-%d"))
-        tk.Entry(self, textvariable=self.date_var, width=12).grid(row=0, column=1, padx=5, pady=5)
+        tk.Entry(self, textvariable=self.date_var, width=12).grid(row=row, column=1, padx=5, pady=5)
+        row += 1
 
         # Action
-        tk.Label(self, text="Action:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        tk.Label(self, text="Action:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
         self.action_var = tk.StringVar(value=transaction[3] if transaction else "Buy")
         actions = ["Buy", "Sell", "Trade", "StakeIn", "StakeOut", "Reward"]
         self.action_cb = ttk.Combobox(self, textvariable=self.action_var, values=actions, state="readonly", width=10)
-        self.action_cb.grid(row=1, column=1, padx=5, pady=5)
+        self.action_cb.grid(row=row, column=1, padx=5, pady=5)
         self.action_cb.bind("<<ComboboxSelected>>", self.on_action_change)
+        row += 1
 
-        # Standard fields (for Buy/Sell/etc)
-        tk.Label(self, text="Token:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+        # Dynamic labels
+        self.token_lbl = tk.Label(self, text="Token:")
+        self.token_lbl.grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
         self.token_var = tk.StringVar(value=transaction[2] if transaction else "")
-        tk.Entry(self, textvariable=self.token_var, width=12).grid(row=2, column=1, padx=5, pady=5)
+        tk.Entry(self, textvariable=self.token_var, width=12).grid(row=row, column=1, padx=5, pady=5)
+        row += 1
 
-        tk.Label(self, text="Amount:").grid(row=3, column=0, sticky=tk.W, padx=5, pady=5)
+        self.amount_lbl = tk.Label(self, text="Amount:")
+        self.amount_lbl.grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
         self.token_amt_var = tk.DoubleVar(value=transaction[4] if transaction else 0.0)
-        tk.Entry(self, textvariable=self.token_amt_var, width=12).grid(row=3, column=1, padx=5, pady=5)
+        tk.Entry(self, textvariable=self.token_amt_var, width=12).grid(row=row, column=1, padx=5, pady=5)
+        row += 1
 
-        tk.Label(self, text="CAD Value:").grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
+        self.cad_lbl = tk.Label(self, text="CAD Value:")
+        self.cad_lbl.grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
         self.cad_amt_var = tk.DoubleVar(value=transaction[5] if transaction else 0.0)
-        tk.Entry(self, textvariable=self.cad_amt_var, width=12).grid(row=4, column=1, padx=5, pady=5)
+        tk.Entry(self, textvariable=self.cad_amt_var, width=12).grid(row=row, column=1, padx=5, pady=5)
+        row += 1
 
-        tk.Label(self, text="Exchange Fee (CAD):").grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
-        self.fee_cad_var = tk.DoubleVar(value=transaction[10] if transaction and len(transaction) > 10 else 0.0)
-        tk.Entry(self, textvariable=self.fee_cad_var, width=12).grid(row=5, column=1, padx=5, pady=5)
-
-        tk.Label(self, text="Gas/Network Fee (CAD):").grid(row=6, column=0, sticky=tk.W, padx=5, pady=5)
-        self.gas_cad_var = tk.DoubleVar(value=transaction[11] if transaction and len(transaction) > 11 else 0.0)
-        tk.Entry(self, textvariable=self.gas_cad_var, width=12).grid(row=6, column=1, padx=5, pady=5)
-
-        # Trade-specific fields (initially hidden)
+        # Trade fields (initially hidden)
         self.sent_token_lbl = tk.Label(self, text="Sent Token:")
-        self.sent_token_var = tk.StringVar(value=transaction[7] if transaction else "")
+        self.sent_token_var = tk.StringVar(value=transaction[7] if transaction and len(transaction) > 7 else "")
         self.sent_token_ent = tk.Entry(self, textvariable=self.sent_token_var, width=12)
 
         self.sent_amt_lbl = tk.Label(self, text="Sent Amount:")
-        self.sent_amt_var = tk.DoubleVar(value=transaction[8] if transaction else 0.0)
+        self.sent_amt_var = tk.DoubleVar(value=transaction[8] if transaction and len(transaction) > 8 else 0.0)
         self.sent_amt_ent = tk.Entry(self, textvariable=self.sent_amt_var, width=12)
 
         self.sent_cad_lbl = tk.Label(self, text="Sent CAD Value:")
-        self.sent_cad_var = tk.DoubleVar(value=transaction[9] if transaction else 0.0)
+        self.sent_cad_var = tk.DoubleVar(value=transaction[9] if transaction and len(transaction) > 9 else 0.0)
         self.sent_cad_ent = tk.Entry(self, textvariable=self.sent_cad_var, width=12)
 
         self.sent_widgets = [
@@ -121,84 +123,162 @@ class TransactionDialog(tk.Toplevel):
             (self.sent_cad_lbl, self.sent_cad_ent)
         ]
 
+        # Fee fields (always shown)
+        tk.Label(self, text="Exchange Fee (CAD):").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        self.fee_cad_var = tk.DoubleVar(value=transaction[10] if transaction and len(transaction) > 10 else 0.0)
+        tk.Entry(self, textvariable=self.fee_cad_var, width=12).grid(row=row, column=1, padx=5, pady=5)
+        row += 1
+
+        tk.Label(self, text="Gas/Network Fee (CAD):").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        self.gas_cad_var = tk.DoubleVar(value=transaction[11] if transaction and len(transaction) > 11 else 0.0)
+        tk.Entry(self, textvariable=self.gas_cad_var, width=12).grid(row=row, column=1, padx=5, pady=5)
+        row += 1
+
         # Notes
-        tk.Label(self, text="Notes:").grid(row=8, column=0, sticky=tk.W, padx=5, pady=5)
+        tk.Label(self, text="Notes:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
         self.notes_var = tk.StringVar(value=transaction[6] if transaction else "")
-        tk.Entry(self, textvariable=self.notes_var, width=30).grid(row=8, column=1, padx=5, pady=5)
+        tk.Entry(self, textvariable=self.notes_var, width=30).grid(row=row, column=1, padx=5, pady=5)
+        row += 1
+
+        # Save row for trade fields
+        self.trade_start_row = row
 
         # Buttons
         btn_frame = tk.Frame(self)
-        btn_frame.grid(row=9, column=0, columnspan=2, pady=10)
-        tk.Button(btn_frame, text="OK", command=self.on_ok).pack(side=tk.LEFT, padx=5)
+        btn_frame.grid(row=row, column=0, columnspan=2, pady=10)
+        self.ok_btn = tk.Button(btn_frame, text="OK", command=self.on_ok, default=tk.ACTIVE)
+        self.ok_btn.pack(side=tk.LEFT, padx=5)
+        self.bind('<Return>', lambda event: self.ok_btn.invoke())
+        self.bind('<Escape>', lambda event: self.destroy())
         tk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.LEFT, padx=5)
 
         # Trigger initial layout
         self.on_action_change()
-        # Set focus to the dialog
-        self.focus_set()
         self.wait_window(self)
 
+        # Set focus to first entry field
+        self.after(50, self.focus_first_entry)
+
+    def focus_first_entry(self):
+        try:
+            for child in self.winfo_children():
+                if isinstance(child, tk.Frame):
+                    for grandchild in child.winfo_children():
+                        if isinstance(grandchild, tk.Entry):
+                            grandchild.focus()
+                            return
+                elif isinstance(child, tk.Entry):
+                    child.focus()
+                    return
+        except tk.TclError:
+            # Dialog was destroyed before focus could be set — safe to ignore
+            pass
+
     def on_action_change(self, event=None):
-        # Hide all sent widgets
+        action = self.action_var.get()
+        
+        # Update main labels
+        token_text, amount_text, cad_text = self.label_map.get(action, ("Token:", "Amount:", "CAD Value:"))
+        self.token_lbl.config(text=token_text)
+        self.amount_lbl.config(text=amount_text)
+        self.cad_lbl.config(text=cad_text)
+
+        # Show/hide trade fields
         for lbl, ent in self.sent_widgets:
-            lbl.grid_remove()
-            ent.grid_remove()
-        # Show if Trade
-        if self.action_var.get() == "Trade":
-            base_row = 5
-            for i, (lbl, ent) in enumerate(self.sent_widgets):
-                lbl.grid(row=base_row+i, column=0, sticky=tk.W, padx=5, pady=5)
-                ent.grid(row=base_row+i, column=1, padx=5, pady=5)
+            lbl.grid_forget()
+            ent.grid_forget()
+
+        if action == "Trade":
+            current_row = self.trade_start_row
+            for lbl, ent in self.sent_widgets:
+                lbl.grid(row=current_row, column=0, sticky=tk.W, padx=5, pady=5)
+                ent.grid(row=current_row, column=1, padx=5, pady=5)
+                current_row += 1
+            btn_frame = self.children['!frame']
+            btn_frame.grid(row=current_row, column=0, columnspan=2, pady=10)
+        else:
+            btn_frame = self.children['!frame']
+            btn_frame.grid(row=self.trade_start_row, column=0, columnspan=2, pady=10)
 
     def on_ok(self):
         try:
-            # Validate date format
+            # Validate date
             datetime.strptime(self.date_var.get(), "%Y-%m-%d")
             
-            # Validate amounts
+            action = self.action_var.get()
+            token = self.token_var.get().strip()
             token_amount = float(self.token_amt_var.get())
             cad_amount = float(self.cad_amt_var.get())
-            
-            if token_amount <= 0:
-                messagebox.showerror("Input Error", "Token amount must be greater than 0")
+
+            # --- Common validations (all actions) ---
+            if not token:
+                messagebox.showerror("Input Error", "Token cannot be empty")
                 return
-                
-            if cad_amount <= 0:
-                messagebox.showerror("Input Error", "CAD amount must be greater than 0")
+            if token_amount <= 0:
+                messagebox.showerror("Input Error", "Amount must be greater than 0")
+                return
+            if cad_amount < 0:
+                messagebox.showerror("Input Error", "CAD value cannot be negative")
                 return
 
-            # Validate fees (allow zero, but must be numeric)
+            # --- Trade-specific validations ---
+            if action == "Trade":
+                sent_token = self.sent_token_var.get().strip()
+                try:
+                    sent_amount = float(self.sent_amt_var.get())
+                    sent_cad = float(self.sent_cad_var.get())
+                except ValueError:
+                    messagebox.showerror("Input Error", "Sent amount and CAD must be valid numbers")
+                    return
+
+                if not sent_token:
+                    messagebox.showerror("Input Error", "Sent Token cannot be empty for a Trade")
+                    return
+                if sent_amount <= 0:
+                    messagebox.showerror("Input Error", "Sent Amount must be greater than 0")
+                    return
+                if sent_cad < 0:
+                    messagebox.showerror("Input Error", "Sent CAD cannot be negative")
+                    return
+
+                # Store for result
+                sent_token_val = sent_token
+                sent_amount_val = sent_amount
+                sent_cad_val = sent_cad
+
+            else:
+                # Non-Trade: sent fields are None
+                sent_token_val = None
+                sent_amount_val = None
+                sent_cad_val = None
+
+            # --- Fee validations (all actions) ---
             try:
                 fee_cad = float(self.fee_cad_var.get() or 0.0)
                 gas_cad = float(self.gas_cad_var.get() or 0.0)
+                if fee_cad < 0 or gas_cad < 0:
+                    messagebox.showerror("Input Error", "Fees cannot be negative")
+                    return
             except ValueError:
                 messagebox.showerror("Input Error", "Fee and gas must be valid numbers")
                 return
 
-            action = self.action_var.get()
-            result = [
+            # Build result tuple (11 values)
+            self.result = (
                 self.date_var.get(),
-                self.token_var.get().strip(),
+                token,
                 action,
                 token_amount,
                 cad_amount,
-                self.notes_var.get()
-            ]
-            
-            # Add trade fields if applicable
-            if action == "Trade":
-                sent_token = self.sent_token_var.get().strip()
-                sent_amount = float(self.sent_amt_var.get() or 0.0)
-                sent_cad = float(self.sent_cad_var.get() or 0.0)
-                result.extend([sent_token, sent_amount, sent_cad])
-            else:
-                result.extend([None, None, None])  # sent_token, sent_amount, sent_cad
-
-            # ALWAYS add fee_cad and gas_cad (for all actions)
-            result.extend([fee_cad, gas_cad])
-
-            self.result = tuple(result)
+                self.notes_var.get(),
+                sent_token_val,
+                sent_amount_val,
+                sent_cad_val,
+                fee_cad,
+                gas_cad
+            )
             self.destroy()
+
         except Exception as e:
             messagebox.showerror("Input Error", f"Invalid input:\n{e}")
 
@@ -489,7 +569,6 @@ class CryptoACBApp:
         self.load_acb_summary()
 
     def generate_report_data(self):
-        """Compute realized capital gains and gas losses by replaying transactions."""
         with sqlite3.connect(DB_FILE) as conn:
             cur = conn.execute("""
                 SELECT date, token, action, token_amount, cad_amount,
@@ -501,41 +580,54 @@ class CryptoACBApp:
             acb_state = defaultdict(lambda: {"total_acb": 0.0, "units_held": 0.0})
             total_realized_gain = 0.0
             total_gas_loss = 0.0
+            total_exchange_fees = 0.0
+            action_counts = defaultdict(int)
+            
+            # Track per-token gains/losses
+            token_gains = defaultdict(float)
+            token_gas = defaultdict(float)
 
             for row in cur.fetchall():
                 (date, token, action, token_amt, cad_amt,
                  sent_token, sent_amt, sent_cad, fee_cad, gas_cad) = row
 
-                # Accumulate gas fees
-                if gas_cad and gas_cad > 0:
-                    total_gas_loss += gas_cad
+                action_counts[action] += 1
+                fee_cad = fee_cad or 0.0
+                gas_cad = gas_cad or 0.0
+
+                # Accumulate totals
+                total_exchange_fees += fee_cad
+                total_gas_loss += gas_cad
+                if gas_cad > 0:
+                    token_gas[token] += gas_cad
+                    if sent_token:
+                        token_gas[sent_token] += gas_cad  # or assign to primary token
 
                 if action == "Buy":
-                    total_cost = cad_amt + (fee_cad or 0.0)
+                    total_cost = cad_amt + fee_cad
                     acb_state[token]["total_acb"] += total_cost
                     acb_state[token]["units_held"] += token_amt
 
                 elif action == "Sell":
-                    net_proceeds = cad_amt - (fee_cad or 0.0)
+                    net_proceeds = cad_amt - fee_cad
                     state = acb_state[token]
                     if state["units_held"] <= 0:
-                        # No ACB basis — full gain
                         realized_gain = net_proceeds
                     else:
                         acb_per = state["total_acb"] / state["units_held"]
                         cost_basis = acb_per * token_amt
                         realized_gain = net_proceeds - cost_basis
-                        # Reduce ACB pool
                         state["total_acb"] = max(0.0, state["total_acb"] - cost_basis)
                         state["units_held"] = max(0.0, state["units_held"] - token_amt)
                     total_realized_gain += realized_gain
+                    token_gains[token] += realized_gain
 
                 elif action == "Trade":
-                    # Handle sent_token (sell)
+                    # Sent token (sell)
                     if sent_token and sent_amt and sent_cad is not None:
                         sent_state = acb_state[sent_token]
                         if sent_state["units_held"] <= 0:
-                            realized_gain_sent = sent_cad  # full gain
+                            realized_gain_sent = sent_cad
                         else:
                             acb_per_sent = sent_state["total_acb"] / sent_state["units_held"]
                             cost_basis_sent = acb_per_sent * sent_amt
@@ -543,29 +635,76 @@ class CryptoACBApp:
                             sent_state["total_acb"] = max(0.0, sent_state["total_acb"] - cost_basis_sent)
                             sent_state["units_held"] = max(0.0, sent_state["units_held"] - sent_amt)
                         total_realized_gain += realized_gain_sent
+                        token_gains[sent_token] += realized_gain_sent
 
-                    # Handle received token (buy)
-                    total_cost = cad_amt + (fee_cad or 0.0)
+                    # Received token (buy)
+                    total_cost = cad_amt + fee_cad
                     acb_state[token]["total_acb"] += total_cost
                     acb_state[token]["units_held"] += token_amt
+
+            # Build current holdings
+            current_holdings = {}
+            for token, state in acb_state.items():
+                if state["units_held"] > 0:
+                    current_holdings[token] = {
+                        "units": state["units_held"],
+                        "total_acb": state["total_acb"],
+                        "acb_per_unit": state["total_acb"] / state["units_held"]
+                    }
 
             return {
                 "total_realized_gain": total_realized_gain,
                 "total_gas_loss": total_gas_loss,
-                "net_pnl": total_realized_gain - total_gas_loss
+                "total_exchange_fees": total_exchange_fees,
+                "net_pnl": total_realized_gain - total_gas_loss,
+                "action_counts": dict(action_counts),
+                "token_gains": dict(token_gains),
+                "token_gas": dict(token_gas),
+                "current_holdings": current_holdings
             }
 
     def update_report(self):
         data = self.generate_report_data()
-        report = (
-            "📊 Ledge Tax Summary\n"
-            "====================\n\n"
-            f"Total Realized Capital Gains: ${data['total_realized_gain']:.2f}\n"
-            f"Total Gas Fees (Capital Losses): -${data['total_gas_loss']:.2f}\n"
-            f"Net PnL (Gains - Losses): ${data['net_pnl']:.2f}\n\n"
-            "ℹ️ Note: Unrealized gains not included.\n"
-            "ℹ️ Export full transaction history for accountant."
-        )
+        report = "📊 Ledge Tax & Portfolio Summary\n"
+        report += "=" * 40 + "\n\n"
+
+        # --- Financial Totals ---
+        report += "💰 Financial Summary\n"
+        report += f"Total Realized Capital Gains: ${data['total_realized_gain']:.2f}\n"
+        report += f"Total Gas Fees (Capital Losses): -${data['total_gas_loss']:.2f}\n"
+        report += f"Total Exchange Fees Paid: ${data['total_exchange_fees']:.2f}\n"
+        report += f"Net PnL (Gains - Gas Losses): ${data['net_pnl']:.2f}\n\n"
+
+        # --- Activity ---
+        report += "📈 Activity Summary\n"
+        for action, count in sorted(data['action_counts'].items()):
+            report += f"{action}: {count} transaction(s)\n"
+        report += "\n"
+
+        # --- Per-Token Gains ---
+        if data['token_gains']:
+            report += "🔖 Realized Gains by Token\n"
+            for token, gain in sorted(data['token_gains'].items(), key=lambda x: -x[1]):
+                report += f"{token}: ${gain:.2f}\n"
+            report += "\n"
+
+        # --- Current Holdings ---
+        if data['current_holdings']:
+            report += "💼 Current Holdings\n"
+            for token, h in sorted(data['current_holdings'].items()):
+                report += f"{token}: {h['units']:.8f} units @ ${h['acb_per_unit']:.4f}/unit (ACB: ${h['total_acb']:.2f})\n"
+            report += "\n"
+
+        # --- Gas by Token ---
+        if data['token_gas']:
+            report += "⛽ Gas Fees by Token\n"
+            for token, gas in sorted(data['token_gas'].items(), key=lambda x: -x[1]):
+                report += f"{token}: -${gas:.2f}\n"
+            report += "\n"
+
+        report += "ℹ️ Note: Unrealized gains not included in PnL.\n"
+        report += "ℹ️ Use 'Export CSV' for full audit trail."
+
         self.report_text.delete(1.0, tk.END)
         self.report_text.insert(tk.END, report)
 

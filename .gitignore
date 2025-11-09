@@ -1,3 +1,5 @@
-ledge.db
 __pycache__/
 *.pyc
+# Ledge data files
+ledge.db
+ledge.ini
