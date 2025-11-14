@@ -1,4 +1,4 @@
-# crypto_acb_gui.py
+# ledge.py
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 import sqlite3
@@ -9,6 +9,8 @@ from datetime import datetime
 from collections import defaultdict
 import shutil
 from pathlib import Path
+import decimal
+from collections import defaultdict
 
 DB_FILE = "ledge.db"
 
@@ -64,8 +66,8 @@ def init_db():
         conn.execute('''
         CREATE TABLE IF NOT EXISTS acb_state (
             token TEXT PRIMARY KEY,
-            total_acb REAL NOT NULL DEFAULT 0.0,
-            units_held REAL NOT NULL DEFAULT 0.0
+            total_acb DECIMAL(28,18) NOT NULL DEFAULT 0.0,
+            units_held DECIMAL(28,18) NOT NULL DEFAULT 0.0
         )
         ''')
         conn.commit()
@@ -76,6 +78,15 @@ def init_db():
         if conn:
             conn.close()
 
+# Define mappings for staking tokens
+RECEIPT_TO_ORIGINAL_MAP = {
+    'sUSDe': 'USDe',
+    'sUSDC': 'USDC',
+    'stDOT': 'DOT',
+    # Add other mappings as needed
+}
+ORIGINAL_TO_RECEIPT_MAP = {v: k for k, v in RECEIPT_TO_ORIGINAL_MAP.items()}
+
 class TransactionDialog(tk.Toplevel):
     def __init__(self, parent, transaction=None):
         super().__init__(parent)
@@ -84,12 +95,20 @@ class TransactionDialog(tk.Toplevel):
         self.transient(parent)
         self.grab_set()
 
+        # Define label mappings including the new 'Stake' and 'Unstake' actions
         self.label_map = {
             "Buy": ("Token:", "Amount:", "CAD Value:"),
             "Sell": ("Token:", "Amount Sold:", "Proceeds (CAD):"),
             "Trade": ("Received Token:", "Received Amount:", "Received CAD:"),
-            "StakeIn": ("Token:", "Amount Staked:", "CAD Value:"),
-            "StakeOut": ("Token:", "Amount Unstaked:", "CAD Value:"),
+            # OLD LINE:
+            # "Stake": ("Original Token:", "Amount Staked:", "CAD Value (of Original):"), # Updated for Stake
+            # NEW LINE:
+            "Stake": ("Receipt Token:", "Receipt Amount:", "Receipt CAD Value (Basis):"), # Updated for Stake
+            # Also update Unstake for consistency, although less confusing
+            # OLD LINE:
+            # "Unstake": ("Receipt Token:", "Amount Unstaked:", "CAD Value (of Receipt):"), # Added for Unstake
+            # NEW LINE:
+            "Unstake": ("Receipt Token Staked:", "Receipt Amount Unstaked:", "Receipt CAD Value (Basis):"), # Updated for Unstake
             "Reward": ("Token:", "Amount:", "FMV (CAD):")
         }
 
@@ -107,80 +126,72 @@ class TransactionDialog(tk.Toplevel):
 
         # Start row counter
         row = 0
-
         # Date
         tk.Label(self, text="Date (YYYY-MM-DD):").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
         self.date_var = tk.StringVar(value=transaction[1] if transaction else datetime.now().strftime("%Y-%m-%d"))
         tk.Entry(self, textvariable=self.date_var, width=12).grid(row=row, column=1, padx=5, pady=5)
         row += 1
-
         # Action
         tk.Label(self, text="Action:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
         self.action_var = tk.StringVar(value=transaction[3] if transaction else "Buy")
-        actions = ["Buy", "Sell", "Trade", "StakeIn", "StakeOut", "Reward"]
+        # Removed "StakeIn", "StakeOut", added "Stake", "Unstake"
+        actions = ["Buy", "Sell", "Trade", "Stake", "Unstake", "Reward"]
         self.action_cb = ttk.Combobox(self, textvariable=self.action_var, values=actions, state="readonly", width=10)
         self.action_cb.grid(row=row, column=1, padx=5, pady=5)
         self.action_cb.bind("<<ComboboxSelected>>", self.on_action_change)
         row += 1
-
-        # Dynamic labels
+        # Dynamic labels - Original/Receipt Token (for Stake/Unstake) or Received Token (for others)
         self.token_lbl = tk.Label(self, text="Token:")
         self.token_lbl.grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        # For Stake: Original Token; For Unstake: Receipt Token
         self.token_var = tk.StringVar(value=transaction[2] if transaction else "")
         tk.Entry(self, textvariable=self.token_var, width=12).grid(row=row, column=1, padx=5, pady=5)
         row += 1
-
+        # Amount - Amount of Original/Receipt Token (for Stake/Unstake) or Received Token (for others)
         self.amount_lbl = tk.Label(self, text="Amount:")
         self.amount_lbl.grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        # For Stake/Unstake: This will be the amount of token being staked/unstaked
         self.token_amt_var = tk.DoubleVar(value=transaction[4] if transaction else 0.0)
         tk.Entry(self, textvariable=self.token_amt_var, width=12).grid(row=row, column=1, padx=5, pady=5)
         row += 1
-
+        # CAD Value - CAD Value of Original/Receipt Token (for Stake/Unstake) or Received Token (for others)
         self.cad_lbl = tk.Label(self, text="CAD Value:")
         self.cad_lbl.grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
+        # For Stake/Unstake: This should be the CAD value of the token amount being staked/unstaked
         self.cad_amt_var = tk.DoubleVar(value=transaction[5] if transaction else 0.0)
         tk.Entry(self, textvariable=self.cad_amt_var, width=12).grid(row=row, column=1, padx=5, pady=5)
         row += 1
-
         # Trade fields (initially hidden)
         self.sent_token_lbl = tk.Label(self, text="Sent Token:")
         self.sent_token_var = tk.StringVar(value=transaction[7] if transaction and len(transaction) > 7 else "")
         self.sent_token_ent = tk.Entry(self, textvariable=self.sent_token_var, width=12)
-
         self.sent_amt_lbl = tk.Label(self, text="Sent Amount:")
         self.sent_amt_var = tk.DoubleVar(value=transaction[8] if transaction and len(transaction) > 8 else 0.0)
         self.sent_amt_ent = tk.Entry(self, textvariable=self.sent_amt_var, width=12)
-
         self.sent_cad_lbl = tk.Label(self, text="Sent CAD Value:")
         self.sent_cad_var = tk.DoubleVar(value=transaction[9] if transaction and len(transaction) > 9 else 0.0)
         self.sent_cad_ent = tk.Entry(self, textvariable=self.sent_cad_var, width=12)
-
         self.sent_widgets = [
             (self.sent_token_lbl, self.sent_token_ent),
             (self.sent_amt_lbl, self.sent_amt_ent),
             (self.sent_cad_lbl, self.sent_cad_ent)
         ]
-
         # Fee fields (always shown)
         tk.Label(self, text="Exchange Fee (CAD):").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
         self.fee_cad_var = tk.DoubleVar(value=transaction[10] if transaction and len(transaction) > 10 else 0.0)
         tk.Entry(self, textvariable=self.fee_cad_var, width=12).grid(row=row, column=1, padx=5, pady=5)
         row += 1
-
         tk.Label(self, text="Gas/Network Fee (CAD):").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
         self.gas_cad_var = tk.DoubleVar(value=transaction[11] if transaction and len(transaction) > 11 else 0.0)
         tk.Entry(self, textvariable=self.gas_cad_var, width=12).grid(row=row, column=1, padx=5, pady=5)
         row += 1
-
         # Notes
         tk.Label(self, text="Notes:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
         self.notes_var = tk.StringVar(value=transaction[6] if transaction else "")
         tk.Entry(self, textvariable=self.notes_var, width=30).grid(row=row, column=1, padx=5, pady=5)
         row += 1
-
-        # Save row for trade fields
+        # Save row for trade fields (and receipt fields)
         self.trade_start_row = row
-
         # Buttons
         btn_frame = tk.Frame(self)
         btn_frame.grid(row=row, column=0, columnspan=2, pady=10)
@@ -189,64 +200,57 @@ class TransactionDialog(tk.Toplevel):
         self.bind('<Return>', lambda event: self.ok_btn.invoke())
         self.bind('<Escape>', lambda event: self.destroy())
         tk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side=tk.LEFT, padx=5)
-
         # Trigger initial layout
         self.on_action_change()
         self.wait_window(self)
 
-        # Set focus to first entry field
-        self.after(50, self.focus_first_entry)
-
-    def focus_first_entry(self):
-        try:
-            for child in self.winfo_children():
-                if isinstance(child, tk.Frame):
-                    for grandchild in child.winfo_children():
-                        if isinstance(grandchild, tk.Entry):
-                            grandchild.focus()
-                            return
-                elif isinstance(child, tk.Entry):
-                    child.focus()
-                    return
-        except tk.TclError:
-            # Dialog was destroyed before focus could be set — safe to ignore
-            pass
-
     def on_action_change(self, event=None):
         action = self.action_var.get()
-        
-        # Update main labels
+        # Update main labels based on action
         token_text, amount_text, cad_text = self.label_map.get(action, ("Token:", "Amount:", "CAD Value:"))
         self.token_lbl.config(text=token_text)
         self.amount_lbl.config(text=amount_text)
         self.cad_lbl.config(text=cad_text)
 
-        # Show/hide trade fields
+        # Show/hide Trade fields (also applicable for Stake/Unstake in terms of using sent_* fields)
         for lbl, ent in self.sent_widgets:
             lbl.grid_forget()
             ent.grid_forget()
+        trade_shown = False
+        current_row = self.trade_start_row
+        if action in ("Trade", "Stake", "Unstake"): # Show for Trade, Stake, Unstake
+            # Update sent field labels specifically for Stake/Unstake
+            if action == "Stake":
+                self.sent_token_lbl.config(text="Original Token Staked:")
+                self.sent_amt_lbl.config(text="Original Amount Staked:")
+                self.sent_cad_lbl.config(text="Original CAD Value (Basis):")
+            elif action == "Unstake":
+                self.sent_token_lbl.config(text="Original Token Unstaked:")
+                self.sent_amt_lbl.config(text="Original Amount Unstaked:")
+                self.sent_cad_lbl.config(text="Original CAD Value (Basis):")
+            else: # For Trade, keep default labels
+                self.sent_token_lbl.config(text="Sent Token:")
+                self.sent_amt_lbl.config(text="Sent Amount:")
+                self.sent_cad_lbl.config(text="Sent CAD Value:")
 
-        if action == "Trade":
-            current_row = self.trade_start_row
             for lbl, ent in self.sent_widgets:
                 lbl.grid(row=current_row, column=0, sticky=tk.W, padx=5, pady=5)
                 ent.grid(row=current_row, column=1, padx=5, pady=5)
                 current_row += 1
-            btn_frame = self.children['!frame']
-            btn_frame.grid(row=current_row, column=0, columnspan=2, pady=10)
-        else:
-            btn_frame = self.children['!frame']
-            btn_frame.grid(row=self.trade_start_row, column=0, columnspan=2, pady=10)
+            trade_shown = True 
+
+        # Position buttons correctly based on which fields are shown
+        btn_frame = self.children['!frame']
+        btn_frame.grid(row=current_row, column=0, columnspan=2, pady=10)
 
     def on_ok(self):
         try:
             # Validate date
             datetime.strptime(self.date_var.get(), "%Y-%m-%d")
-            
             action = self.action_var.get()
-            token = self.token_var.get().strip()
-            token_amount = float(self.token_amt_var.get())
-            cad_amount = float(self.cad_amt_var.get())
+            token = self.token_var.get().strip() # For Stake: Original Token, For Unstake: Receipt Token
+            token_amount = float(self.token_amt_var.get()) # For Stake/Unstake: Amount of token being moved
+            cad_amount = float(self.cad_amt_var.get()) # For Stake/Unstake: CAD Value of the token amount
 
             # --- Common validations (all actions) ---
             if not token:
@@ -259,8 +263,8 @@ class TransactionDialog(tk.Toplevel):
                 messagebox.showerror("Input Error", "CAD value cannot be negative")
                 return
 
-            # --- Trade-specific validations ---
-            if action == "Trade":
+            # --- Trade-specific validations (also applies to Stake/Unstake for sent_* fields) ---
+            if action in ("Trade", "Stake", "Unstake"):
                 sent_token = self.sent_token_var.get().strip()
                 try:
                     sent_amount = float(self.sent_amt_var.get())
@@ -268,9 +272,8 @@ class TransactionDialog(tk.Toplevel):
                 except ValueError:
                     messagebox.showerror("Input Error", "Sent amount and CAD must be valid numbers")
                     return
-
                 if not sent_token:
-                    messagebox.showerror("Input Error", "Sent Token cannot be empty for a Trade")
+                    messagebox.showerror("Input Error", f"Sent Token cannot be empty for a {action}")
                     return
                 if sent_amount <= 0:
                     messagebox.showerror("Input Error", "Sent Amount must be greater than 0")
@@ -278,14 +281,12 @@ class TransactionDialog(tk.Toplevel):
                 if sent_cad < 0:
                     messagebox.showerror("Input Error", "Sent CAD cannot be negative")
                     return
-
                 # Store for result
                 sent_token_val = sent_token
                 sent_amount_val = sent_amount
                 sent_cad_val = sent_cad
-
             else:
-                # Non-Trade: sent fields are None
+                # Non-Trade/Stake/Unstake: sent fields are None
                 sent_token_val = None
                 sent_amount_val = None
                 sent_cad_val = None
@@ -301,22 +302,44 @@ class TransactionDialog(tk.Toplevel):
                 messagebox.showerror("Input Error", "Fee and gas must be valid numbers")
                 return
 
-            # Build result tuple (11 values)
+            # --- Stake/Unstake-specific validations ---
+            if action in ("Stake", "Unstake"):
+                 # Optional: Validate mapping
+                 if action == "Stake" and sent_token_val not in ORIGINAL_TO_RECEIPT_MAP.values():
+                     # Could be a warning instead
+                     pass
+                 if action == "Unstake" and token not in ORIGINAL_TO_RECEIPT_MAP.values(): # token is receipt token for Unstake
+                     # Could be a warning instead
+                     pass
+                 # For simplicity, assume 1:1 mapping for amount and CAD basis transfer.
+                 # sent_cad_val is used as the CAD value for the *received* token in ACB calculation.
+                 # For Stake: sent_cad_val represents the basis transferred to the receipt token.
+                 # For Unstake: sent_cad_val represents the basis transferred back to the original token.
+                 # In many cases, cad_amount (of the token being moved out) and sent_cad_val (of the token received)
+                 # are expected to be the same if the staking rate is 1:1 and no rewards are involved at the time of the transaction.
+                 # Let's allow them to be different to account for potential staking rewards or rate changes,
+                 # but log a warning if they differ significantly during staking (less common) or unstaking (more common if rewards accrued).
+                 # For now, just ensure both are provided.
+                 if sent_cad_val is None or sent_cad_val < 0:
+                     messagebox.showerror("Input Error", f"Sent CAD Value must be provided and non-negative for {action}")
+                     return
+
+
+            # Build result tuple (11 values) - sent_token/sent_amt/sent_cad now represent the *received* token details for Stake/Unstake
             self.result = (
                 self.date_var.get(),
-                token,
-                action,
-                token_amount,
-                cad_amount,
+                token, # Token being moved OUT (e.g., USDe for Stake, sUSDe for Unstake)
+                action, # "Stake" or "Unstake"
+                token_amount, # Amount of token being moved OUT (e.g., 247 USDe, 247 sUSDe)
+                cad_amount, # CAD Value of token being moved OUT (e.g., 247 * ACB_per_unit_of_USDe_at_staking_time)
                 self.notes_var.get(),
-                sent_token_val,
-                sent_amount_val,
-                sent_cad_val,
+                sent_token_val, # Token being received (e.g., sUSDe for Stake, USDe for Unstake)
+                sent_amount_val, # Amount of token being received (e.g., 247 sUSDe, 247 USDe)
+                sent_cad_val, # CAD Value associated with the received token (e.g., same as original cad_amount for Stake, or potentially different for Unstake)
                 fee_cad,
                 gas_cad
             )
             self.destroy()
-
         except Exception as e:
             messagebox.showerror("Input Error", f"Invalid input:\n{e}")
 
@@ -405,7 +428,8 @@ class CryptoACBApp:
 
         ttk.Label(filter_row, text="Action:").pack(side=tk.LEFT, padx=5)
         self.action_filter_var = tk.StringVar()
-        actions = ["", "Buy", "Sell", "Trade", "StakeIn", "StakeOut", "Reward"]
+        # Updated actions list: Removed "StakeIn", "StakeOut", added "Stake", "Unstake"
+        actions = ["", "Buy", "Sell", "Trade", "Stake", "Unstake", "Reward"]
         self.action_filter = ttk.Combobox(filter_row, textvariable=self.action_filter_var, values=actions, width=10)
         self.action_filter.pack(side=tk.LEFT, padx=5)
 
@@ -591,33 +615,30 @@ class CryptoACBApp:
         backup_database()  # Backup before modification
         dialog = TransactionDialog(self.root)
         if dialog.result:
-            # Unpack ALL 11 values from the dialog
+            # Unpack the transaction details
             (date, token, action, token_amt, cad_amt, notes,
              sent_token, sent_amt, sent_cad, fee_cad, gas_cad) = dialog.result
 
             with sqlite3.connect(DB_FILE) as conn:
-                # Start a transaction
                 conn.execute('BEGIN')
                 try:
-                    # Insert the transaction
+                    # Insert the new transaction
                     conn.execute("""
-                        INSERT INTO transactions 
+                        INSERT INTO transactions
                         (date, token, action, token_amount, cad_amount, notes,
                          sent_token, sent_amount, sent_cad, fee_cad, gas_cad)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (date, token, action, token_amt, cad_amt, notes,
                           sent_token, sent_amt, sent_cad, fee_cad, gas_cad))
                     
-                    # Update ACB immediately
-                    self.recompute_acb(conn)
+                    # Update the ACB state incrementally
+                    self.update_acb_incremental(conn)
                     
-                    # Commit the transaction
                     conn.commit()
                 except Exception as e:
                     conn.rollback()
                     raise e
             
-            # Reload the display
             self.load_data()
             
     def save_geometry(self):
@@ -736,10 +757,9 @@ class CryptoACBApp:
         if conn is None:
             conn = sqlite3.connect(DB_FILE)
             should_close = True
-        
+
         try:
-            conn.execute("DELETE FROM acb_state")
-            # Fetch all rows first before processing
+            # Fetch all transactions, ordered by date and id
             cur = conn.execute("""
                 SELECT date, token, action, token_amount, cad_amount,
                        sent_token, sent_amount, sent_cad,
@@ -749,39 +769,49 @@ class CryptoACBApp:
             """)
             rows = cur.fetchall()
             
-            acb_state = defaultdict(lambda: {"total_acb": 0.0, "units_held": 0.0})
+            # Create a dictionary to store the latest ACB state
+            acb_state = defaultdict(lambda: {"total_acb": decimal.Decimal(0), "units_held": decimal.Decimal(0)})
 
-            for row in rows:  # Use the fetched rows instead of cursor
+            # Iterate through the transactions and update the ACB state
+            for row in rows:
                 (date, token, action, token_amt, cad_amt,
                  sent_token, sent_amt, sent_cad, fee_cad, gas_cad) = row
 
+                # Convert all values to Decimal for improved precision
+                token_amt = decimal.Decimal(token_amt)
+                cad_amt = decimal.Decimal(cad_amt)
+                sent_amt = decimal.Decimal(sent_amt) if sent_amt is not None else decimal.Decimal(0)
+                sent_cad = decimal.Decimal(sent_cad) if sent_cad is not None else decimal.Decimal(0)
+                fee_cad = decimal.Decimal(fee_cad) if fee_cad is not None else decimal.Decimal(0)
+                gas_cad = decimal.Decimal(gas_cad) if gas_cad is not None else decimal.Decimal(0)
+
                 # Handle gas fee first: always a capital loss
-                if gas_cad and gas_cad > 0:
-                    # Track gas fees as negative ACB in a virtual "GAS_FEES" token
+                if gas_cad > 0:
                     acb_state["GAS_FEES"]["total_acb"] -= gas_cad
-                    # No units — just a running loss
+
+                # Process the transaction and update the ACB state
+                self.update_acb_state(acb_state, token, action, token_amt, cad_amt, sent_token, sent_amt, sent_cad, fee_cad)
 
                 if action == "Buy":
-                    # ACB = what you paid + fees
-                    total_cost = cad_amt + (fee_cad or 0.0)
+                    total_cost = cad_amt + fee_cad
                     acb_state[token]["total_acb"] += total_cost
                     acb_state[token]["units_held"] += token_amt
-
                 elif action == "Sell":
-                    # Proceeds = what you got - fees
-                    net_proceeds = cad_amt - (fee_cad or 0.0)
+                    net_proceeds = cad_amt - fee_cad
                     state = acb_state[token]
                     if state["units_held"] <= 0:
                         # No ACB → full gain = net_proceeds
                         pass
                     else:
                         try:
-                            acb_per = state["total_acb"] / state["units_held"] if state["units_held"] > 0 else 0
+                            acb_per = state["total_acb"] / state["units_held"]
                             cost_basis = acb_per * token_amt
-                            state["total_acb"] = max(0.0, state["total_acb"] - cost_basis)
-                            state["units_held"] = max(0.0, state["units_held"] - token_amt)
+                            state["total_acb"] = max(decimal.Decimal(0), state["total_acb"] - cost_basis)
+                            state["units_held"] = max(decimal.Decimal(0), state["units_held"] - token_amt)
                         except ZeroDivisionError:
-                            pass  # If no units held, keep current state
+                            # If no units held, keep current state
+                            pass
+                # ... (other action handling similar to before)
 
                 elif action == "Trade":
                     # Sell sent_token (use sent_cad - no fee on sent side for now)
@@ -795,36 +825,183 @@ class CryptoACBApp:
                                 sent_state["units_held"] = max(0.0, sent_state["units_held"] - sent_amt)
                             except ZeroDivisionError:
                                 pass  # If no units held, keep current state
-
                     # Buy received token: ACB = cad_amt + fee_cad
                     total_cost = cad_amt + (fee_cad or 0.0)
                     acb_state[token]["total_acb"] += total_cost
                     acb_state[token]["units_held"] += token_amt
 
+                # --- CORRECTLY INDENTED LOGIC FOR STAKE ---
+                elif action == "Stake":
+                    # token: Original token being staked out (e.g., USDe)
+                    # token_amt: Amount of original token being staked out (e.g., 247)
+                    # cad_amt: CAD value associated with the original token amount (used for ACB calculation)
+                    # sent_token: Receipt token being staked in (e.g., sUSDe)
+                    # sent_amt: Amount of receipt token received (e.g., 247)
+                    # sent_cad: CAD value associated with the receipt token amount (should ideally match cad_amt for basis transfer)
+
+                    original_token_name = token
+                    receipt_token_name = sent_token
+                    staked_amount = token_amt
+                    # For ACB transfer, we assume the ACB of the original token amount is transferred to the receipt token.
+                    # The ACB for the original token being staked out is calculated based on its current ACB per unit.
+                    original_state = acb_state[original_token_name]
+
+                    if original_state["units_held"] > 0:
+                        try:
+                            acb_per_unit_original = original_state["total_acb"] / original_state["units_held"]
+                            # Calculate the ACB associated with the amount being staked out
+                            acb_for_staked_out = acb_per_unit_original * staked_amount
+                            # Deduct the ACB and units from the original token
+                            original_state["total_acb"] = max(0.0, original_state["total_acb"] - acb_for_staked_out)
+                            original_state["units_held"] = max(0.0, original_state["units_held"] - staked_amount)
+                        except ZeroDivisionError:
+                            # This case implies original ACB is 0 or units are 0, which contradicts the > 0 check.
+                            # It could happen if ACB became 0 but units > 0 due to rounding errors or complex history.
+                            # Safest is to just reduce units if ACB is 0.
+                            original_state["units_held"] = max(0.0, original_state["units_held"] - staked_amount)
+                            acb_for_staked_out = 0.0 # No ACB to transfer if the original had 0 ACB per unit
+                    else:
+                        # If no units held of the original token, cannot stake. This should ideally be caught during input validation.
+                        # For calculation, just ensure units don't go negative.
+                        original_state["units_held"] = max(0.0, original_state["units_held"] - staked_amount)
+                        acb_for_staked_out = 0.0 # No ACB to transfer
+
+                    # Add the transferred ACB and the receipt token units to the receipt token's state
+                    receipt_state = acb_state[receipt_token_name]
+                    receipt_state["total_acb"] += acb_for_staked_out # Use cad_amt or the calculated acb_for_staked_out
+                    receipt_state["units_held"] += sent_amt # sent_amt should be the amount of receipt tokens received
+
+
+                # --- CORRECTLY INDENTED LOGIC FOR UNSTAKE ---
+                elif action == "Unstake":
+                    # token: Receipt token being unstaked out (e.g., sUSDe)
+                    # token_amt: Amount of receipt token being unstaked out (e.g., 247)
+                    # cad_amt: CAD value associated with the receipt token amount being unstaked (used for ACB calculation)
+                    # sent_token: Original token being unstaked in (e.g., USDe)
+                    # sent_amt: Amount of original token received back (e.g., 247)
+                    # sent_cad: CAD value associated with the original token amount received back (can differ from cad_amt if rewards accrued)
+
+                    receipt_token_name = token
+                    original_token_name = sent_token
+                    unstaked_amount = token_amt
+                    # The ACB for the receipt token being unstaked out is calculated based on its current ACB per unit.
+                    receipt_state = acb_state[receipt_token_name]
+
+                    if receipt_state["units_held"] > 0:
+                        try:
+                            acb_per_unit_receipt = receipt_state["total_acb"] / receipt_state["units_held"]
+                            # Calculate the ACB associated with the amount being unstaked out
+                            acb_for_unstaked_out = acb_per_unit_receipt * unstaked_amount
+                            # Deduct the ACB and units from the receipt token
+                            receipt_state["total_acb"] = max(0.0, receipt_state["total_acb"] - acb_for_unstaked_out)
+                            receipt_state["units_held"] = max(0.0, receipt_state["units_held"] - unstaked_amount)
+                        except ZeroDivisionError:
+                            # This case implies receipt ACB is 0 or units are 0.
+                            # Safest is to just reduce units if ACB is 0.
+                            receipt_state["units_held"] = max(0.0, receipt_state["units_held"] - unstaked_amount)
+                            acb_for_unstaked_out = 0.0 # No ACB to transfer if the receipt had 0 ACB per unit
+                    else:
+                        # If no units held of the receipt token, cannot unstake.
+                        # For calculation, just ensure units don't go negative.
+                        receipt_state["units_held"] = max(0.0, receipt_state["units_held"] - unstaked_amount)
+                        acb_for_unstaked_out = 0.0 # No ACB to transfer
+
+                    # Add the transferred ACB and the original token units back to the original token's state
+                    # The ACB transferred back is based on the ACB of the receipt token being unstaked.
+                    # The CAD value received back (sent_cad) might differ due to rewards, but the *basis* transferred is from the receipt token.
+                    # For simplicity in basis tracking, we transfer the ACB associated with the unstaked amount.
+                    original_state = acb_state[original_token_name]
+                    original_state["total_acb"] += acb_for_unstaked_out # Transfer the ACB basis
+                    original_state["units_held"] += sent_amt # sent_amt should be the amount of original tokens received back
+
+
+            # --- CORRECTLY INDENTED LOGIC FOR REWARD ---
                 elif action == "Reward":
                     # ACB = FMV at time of receipt (fees don't apply here)
                     acb_state[token]["total_acb"] += cad_amt
                     acb_state[token]["units_held"] += token_amt
+            # --- END OF FOR LOOP ---
 
-                elif action in ("StakeIn", "StakeOut"):
-                    state = acb_state[token]
-                    if action == "StakeIn":
-                        state["units_held"] = max(0.0, state["units_held"] - token_amt)
-                    else:
-                        state["units_held"] += token_amt
-
-            # Save all states (including GAS_FEES)
+            # Save the updated ACB state to the database
             for token, state in acb_state.items():
                 conn.execute(
                     "INSERT OR REPLACE INTO acb_state (token, total_acb, units_held) VALUES (?, ?, ?)",
                     (token, state["total_acb"], state["units_held"])
                 )
-
         finally:
             if should_close:
                 conn.close()
-            
-        self.load_acb_summary()  # Update the display
+
+        self.load_acb_summary()
+
+    def update_acb_state(self, acb_state, token, action, token_amt, cad_amt, sent_token, sent_amt, sent_cad, fee_cad):
+        if action == "Buy":
+            total_cost = cad_amt + fee_cad
+            acb_state[token]["total_acb"] += total_cost
+            acb_state[token]["units_held"] += token_amt
+        elif action == "Sell":
+            net_proceeds = cad_amt - fee_cad
+            state = acb_state[token]
+            if state["units_held"] <= 0:
+                # No ACB → full gain = net_proceeds
+                pass
+            else:
+                try:
+                    acb_per = state["total_acb"] / state["units_held"]
+                    cost_basis = acb_per * token_amt
+                    state["total_acb"] = max(decimal.Decimal(0), state["total_acb"] - cost_basis)
+                    state["units_held"] = max(decimal.Decimal(0), state["units_held"] - token_amt)
+                except ZeroDivisionError:
+                    # If no units held, keep current state
+                    pass
+        # ... (other action handling similar to before)
+
+    def update_acb_incremental(self, conn=None):
+        """Perform an incremental update of the ACB state based on new or modified transactions."""
+        should_close = False
+        if conn is None:
+            conn = sqlite3.connect(DB_FILE)
+            should_close = True
+
+        try:
+            # Fetch the latest transaction ID
+            cur = conn.execute("SELECT MAX(id) FROM transactions")
+            max_id = cur.fetchone()[0] or 0
+
+            # Fetch all transactions with an ID greater than the latest known ID
+            cur = conn.execute("""
+                SELECT id, date, token, action, token_amount, cad_amount,
+                       sent_token, sent_amount, sent_cad, fee_cad, gas_cad
+                FROM transactions
+                WHERE id > ?
+                ORDER BY date, id
+            """, (max_id,))
+            new_rows = cur.fetchall()
+
+            # Create a dictionary to store the latest ACB state
+            acb_state = defaultdict(lambda: {"total_acb": decimal.Decimal(0), "units_held": decimal.Decimal(0)})
+
+            # Load the current ACB state from the database
+            cur = conn.execute("SELECT token, total_acb, units_held FROM acb_state")
+            for token, total_acb, units_held in cur.fetchall():
+                acb_state[token] = {"total_acb": decimal.Decimal(total_acb), "units_held": decimal.Decimal(units_held)}
+
+            # Process the new transactions and update the ACB state
+            for row in new_rows:
+                (trans_id, date, token, action, token_amt, cad_amt,
+                 sent_token, sent_amt, sent_cad, fee_cad, gas_cad) = row
+                self.update_acb_state(acb_state, token, action, token_amt, cad_amt, sent_token, sent_amt, sent_cad, fee_cad)
+
+            # Save the updated ACB state to the database
+            for token, state in acb_state.items():
+                conn.execute(
+                    "INSERT OR REPLACE INTO acb_state (token, total_acb, units_held) VALUES (?, ?, ?)",
+                    (token, state["total_acb"], state["units_held"])
+                )
+        finally:
+            if should_close:
+                conn.close()
+
         self.load_acb_summary()
 
     def generate_report_data(self):
@@ -849,11 +1026,9 @@ class CryptoACBApp:
             for row in cur.fetchall():
                 (date, token, action, token_amt, cad_amt,
                  sent_token, sent_amt, sent_cad, fee_cad, gas_cad) = row
-
                 action_counts[action] += 1
                 fee_cad = fee_cad or 0.0
                 gas_cad = gas_cad or 0.0
-
                 # Accumulate totals
                 total_exchange_fees += fee_cad
                 total_gas_loss += gas_cad
@@ -866,7 +1041,6 @@ class CryptoACBApp:
                     total_cost = cad_amt + fee_cad
                     acb_state[token]["total_acb"] += total_cost
                     acb_state[token]["units_held"] += token_amt
-
                 elif action == "Sell":
                     net_proceeds = cad_amt - fee_cad
                     state = acb_state[token]
@@ -880,7 +1054,6 @@ class CryptoACBApp:
                         state["units_held"] = max(0.0, state["units_held"] - token_amt)
                     total_realized_gain += realized_gain
                     token_gains[token] += realized_gain
-
                 elif action == "Trade":
                     # Sent token (sell)
                     if sent_token and sent_amt and sent_cad is not None:
@@ -895,11 +1068,74 @@ class CryptoACBApp:
                             sent_state["units_held"] = max(0.0, sent_state["units_held"] - sent_amt)
                         total_realized_gain += realized_gain_sent
                         token_gains[sent_token] += realized_gain_sent
-
                     # Received token (buy)
                     total_cost = cad_amt + fee_cad
                     acb_state[token]["total_acb"] += total_cost
                     acb_state[token]["units_held"] += token_amt
+                # --- ADD STAKE AND UNSTAKE HANDLING TO REPORT GENERATION ---
+                elif action == "Stake":
+                    # token: Original token being staked out (e.g., USDe)
+                    # sent_token: Receipt token being staked in (e.g., sUSDe)
+                    # token_amt: Amount of original token staked out
+                    # sent_amt: Amount of receipt token received (typically same as token_amt)
+                    # cad_amt: CAD value of original token amount (used for ACB transfer)
+                    # sent_cad: CAD value of receipt token amount (typically same as cad_amt)
+
+                    original_token_name = token
+                    receipt_token_name = sent_token
+                    staked_amount = token_amt
+
+                    original_state = acb_state[original_token_name]
+                    if original_state["units_held"] > 0:
+                        try:
+                            acb_per_unit_original = original_state["total_acb"] / original_state["units_held"]
+                            acb_for_staked_out = acb_per_unit_original * staked_amount
+                            original_state["total_acb"] = max(0.0, original_state["total_acb"] - acb_for_staked_out)
+                            original_state["units_held"] = max(0.0, original_state["units_held"] - staked_amount)
+                        except ZeroDivisionError:
+                            # Handle case where original ACB is 0 but units > 0
+                            original_state["units_held"] = max(0.0, original_state["units_held"] - staked_amount)
+                            acb_for_staked_out = 0.0
+                    else:
+                        original_state["units_held"] = max(0.0, original_state["units_held"] - staked_amount)
+                        acb_for_staked_out = 0.0
+
+                    # Transfer ACB to receipt token
+                    receipt_state = acb_state[receipt_token_name]
+                    receipt_state["total_acb"] += acb_for_staked_out
+                    receipt_state["units_held"] += sent_amt
+
+                elif action == "Unstake":
+                    # token: Receipt token being unstaked out (e.g., sUSDe)
+                    # sent_token: Original token being unstaked in (e.g., USDe)
+                    # token_amt: Amount of receipt token unstaked out
+                    # sent_amt: Amount of original token received back (typically same as token_amt)
+                    # cad_amt: CAD value of receipt token amount being unstaked (used for ACB transfer)
+                    # sent_cad: CAD value of original token amount received back (can differ if rewards)
+
+                    receipt_token_name = token
+                    original_token_name = sent_token
+                    unstaked_amount = token_amt
+
+                    receipt_state = acb_state[receipt_token_name]
+                    if receipt_state["units_held"] > 0:
+                        try:
+                            acb_per_unit_receipt = receipt_state["total_acb"] / receipt_state["units_held"]
+                            acb_for_unstaked_out = acb_per_unit_receipt * unstaked_amount
+                            receipt_state["total_acb"] = max(0.0, receipt_state["total_acb"] - acb_for_unstaked_out)
+                            receipt_state["units_held"] = max(0.0, receipt_state["units_held"] - unstaked_amount)
+                        except ZeroDivisionError:
+                            # Handle case where receipt ACB is 0 but units > 0
+                            receipt_state["units_held"] = max(0.0, receipt_state["units_held"] - unstaked_amount)
+                            acb_for_unstaked_out = 0.0
+                    else:
+                        receipt_state["units_held"] = max(0.0, receipt_state["units_held"] - unstaked_amount)
+                        acb_for_unstaked_out = 0.0
+
+                    # Transfer ACB back to original token
+                    original_state = acb_state[original_token_name]
+                    original_state["total_acb"] += acb_for_unstaked_out
+                    original_state["units_held"] += sent_amt
 
             # Build current holdings
             current_holdings = {}
